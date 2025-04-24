@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "LLMcourse"
+version = "0.1.0"
+description = ""
+authors = ["Vaishali Vinod <vaishalivinod97@gmail.com>"]
+license = "OSF"
+readme = "README.md"
+packages = [
+    { include = "utils"}
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+transformers = "^4.51.3"
+torch = "^2.7.0"
+python-dotenv = "^1.1.0"
+ipykernel = "^6.29.5"
