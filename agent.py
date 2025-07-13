@@ -1,42 +1,41 @@
 import requests
-import re
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-
-tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
-model = AutoModelForCausalLM.from_pretrained(
-    "mistralai/Mistral-7B-Instruct-v0.2",
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
+import os
 
 class EEGReviewAgent:
     def __init__(self):
-        self.papers = []
+        self.api_key = os.getenv("HF_API_KEY")
+        self.model_id = "mistralai/Mistral-7B-Instruct-v0.2"
+        self.endpoint = f"https://api-inference.huggingface.co/models/{self.model_id}"
 
     def search(self, query):
         url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit=5&fields=title,abstract,url"
-        response = requests.get(url)
-        self.papers = response.json().get("data", [])
-        return self.papers
+        res = requests.get(url)
+        return res.json().get("data", [])
 
     def extract_methods(self, papers):
         methods = []
         for p in papers:
-            if "abstract" in p:
-                text = p["abstract"]
-                match = re.search(r"(methods?|procedure)[\s\S]+", text, re.IGNORECASE)
-                if match:
-                    methods.append(match.group(0))
-                else:
-                    methods.append(text)
+            abstract = p.get("abstract", "")
+            methods.append(abstract)
         return methods
 
     def summarize(self, texts):
-        prompt = "Summarize EEG preprocessing steps used in these abstracts:\n\n" + "\n\n".join(texts)
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=300)
-        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+        prompt = f"### Instruction:\nSummarize EEG preprocessing steps from these papers:\n\n" + "\n\n".join(texts) + "\n\n### Response:\n"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 512, "temperature": 0.7}
+        }
+        response = requests.post(self.endpoint, headers=headers, json=payload)
+        output = response.json()
+
+        if isinstance(output, dict) and "error" in output:
+            return f"⚠️ Error from Hugging Face API: {output['error']}"
+
+        return output[0]["generated_text"]
 
     def run(self, dataset_type, goal):
         query = f"{dataset_type} EEG {goal} preprocessing"
@@ -44,3 +43,4 @@ class EEGReviewAgent:
         methods = self.extract_methods(papers)
         summary = self.summarize(methods)
         return summary, papers
+
