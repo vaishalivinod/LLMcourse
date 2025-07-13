@@ -16,8 +16,10 @@ class EEGReviewAgent:
         methods = []
         for p in papers:
             abstract = p.get("abstract", "")
-            methods.append(abstract)
+            if abstract:  # Only add if not empty
+                methods.append(str(abstract))
         return methods
+
 
     def summarize(self, texts):
         prompt = f"### Instruction:\nSummarize EEG preprocessing steps from these papers:\n\n" + "\n\n".join(texts) + "\n\n### Response:\n"
