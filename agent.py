@@ -14,39 +14,33 @@ class EEGReviewAgent:
     def __init__(self):
         self.papers = []
 
-    def search_semantic_scholar(self, dataset_type, research_goal):
-        query = f"{dataset_type} EEG {research_goal} preprocessing"
+    def search(self, query):
         url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit=5&fields=title,abstract,url"
         response = requests.get(url)
         self.papers = response.json().get("data", [])
         return self.papers
 
-    def extract_methods_sections(self, papers):
-        methods_sections = []
-        for paper in papers:
-            if "abstract" in paper:
-                text = paper["abstract"]
-                methods = self._extract_methods_from_text(text)
-                if methods:
-                    methods_sections.append(methods)
-        return methods_sections
+    def extract_methods(self, papers):
+        methods = []
+        for p in papers:
+            if "abstract" in p:
+                text = p["abstract"]
+                match = re.search(r"(methods?|procedure)[\s\S]+", text, re.IGNORECASE)
+                if match:
+                    methods.append(match.group(0))
+                else:
+                    methods.append(text)
+        return methods
 
-    def _extract_methods_from_text(self, text):
-        pattern = re.compile(r"(methods?|methodology|procedure)\s*[:\n]", re.IGNORECASE)
-        match = pattern.search(text)
-        if match:
-            return text[match.start():]
-        return text  # fallback
-
-    def summarize_preprocessing(self, methods_sections):
-        combined_text = "\n\n".join(methods_sections)
-        prompt = f"### Instruction:\nExtract and summarize the EEG preprocessing steps from these studies:\n\n{combined_text}\n\n### Response:"
+    def summarize(self, texts):
+        prompt = "Summarize EEG preprocessing steps used in these abstracts:\n\n" + "\n\n".join(texts)
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=500)
+        outputs = model.generate(**inputs, max_new_tokens=300)
         return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    def run(self, dataset_type, research_goal):
-        papers = self.search_semantic_scholar(dataset_type, research_goal)
-        methods_texts = self.extract_methods_sections(papers)
-        summary = self.summarize_preprocessing(methods_texts)
+    def run(self, dataset_type, goal):
+        query = f"{dataset_type} EEG {goal} preprocessing"
+        papers = self.search(query)
+        methods = self.extract_methods(papers)
+        summary = self.summarize(methods)
         return summary, papers
