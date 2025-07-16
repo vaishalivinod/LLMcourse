@@ -23,6 +23,7 @@ class EEGReviewAgent:
 
     def summarize(self, texts):
         prompt = f"### Instruction:\nSummarize EEG preprocessing steps from these papers:\n\n" + "\n\n".join(texts) + "\n\n### Response:\n"
+    
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -31,13 +32,27 @@ class EEGReviewAgent:
             "inputs": prompt,
             "parameters": {"max_new_tokens": 512, "temperature": 0.7}
         }
-        response = requests.post(self.endpoint, headers=headers, json=payload)
-        output = response.json()
-
-        if isinstance(output, dict) and "error" in output:
-            return f"⚠️ Error from Hugging Face API: {output['error']}"
-
-        return output[0]["generated_text"]
+    
+        try:
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=30)
+    
+            # Log raw response for debugging
+            print("RAW TEXT RESPONSE:", response.text)
+    
+            # This line causes the crash — so wrap it safely
+            try:
+                output = response.json()
+            except Exception as e:
+                return f"Failed to parse JSON: {str(e)}\n\nRaw response:\n{response.text}"
+    
+            # ✅ Handle model errors
+            if isinstance(output, dict) and "error" in output:
+                return f"Hugging Face API Error: {output['error']}"
+    
+            return output[0]["generated_text"]
+    
+        except requests.exceptions.RequestException as e:
+            return f"Request failed: {str(e)}"
 
     def run(self, dataset_type, goal):
         query = f"{dataset_type} EEG {goal} preprocessing"
