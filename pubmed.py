@@ -1,4 +1,3 @@
-# pubmed.py
 import requests
 from xml.etree import ElementTree as ET
 
@@ -10,11 +9,12 @@ def search_pubmed(query, max_results=5):
         "db": "pmc",
         "retmax": max_results,
         "term": query,
-        "retmode": "json"
+        "retmode": "json"   
     }
     response = requests.get(NCBI_API + "esearch.fcgi", params=params)
-    tree = ET.fromstring(response.text)
-    pmc_ids = [id_elem.text for id_elem in tree.findall(".//Id")]
+    response.raise_for_status()  
+    data = response.json()
+    pmc_ids = data.get("esearchresult", {}).get("idlist", [])
     return pmc_ids
 
 def fetch_full_text(pmc_id):
@@ -29,17 +29,19 @@ def fetch_full_text(pmc_id):
 
     try:
         tree = ET.fromstring(response.text)
-        ns = {'pmc': 'http://www.openarchives.org/OAI/2.0/'}
+        # Usually the default namespace is used, get namespaces
+        ns = {'oai': 'http://www.openarchives.org/OAI/2.0/'}
         methods_section = []
 
+        # Find all sections <sec> with title containing 'method'
         for sec in tree.findall(".//sec"):
             title_elem = sec.find("title")
-            if title_elem is not None and "method" in title_elem.text.lower():
+            if title_elem is not None and title_elem.text and "method" in title_elem.text.lower():
                 methods_section.append(ET.tostring(sec, encoding="unicode"))
         
         return methods_section[0] if methods_section else None
     except Exception as e:
-        print("Error parsing PMC:", e)
+        print("Error parsing PMC full text:", e)
         return None
 
 def get_metadata(pmc_id):
@@ -49,16 +51,24 @@ def get_metadata(pmc_id):
         "retmode": "xml"
     }
     response = requests.get(NCBI_API + "efetch.fcgi", params=params)
+    response.raise_for_status()
+
     try:
         tree = ET.fromstring(response.text)
         article = tree.find(".//article-title")
-        authors = [a.findtext("fore-name", "") + " " + a.findtext("last-name", "") 
-                   for a in tree.findall(".//contrib[@contrib-type='author']")]
+        authors = []
+        for contrib in tree.findall(".//contrib[@contrib-type='author']"):
+            fore = contrib.findtext("fore-name", "")
+            last = contrib.findtext("last-name", "")
+            full_name = (fore + " " + last).strip()
+            if full_name:
+                authors.append(full_name)
         year = tree.findtext(".//pub-date/year")
         return {
             "title": article.text if article is not None else "Untitled",
             "authors": authors,
             "year": year,
         }
-    except:
+    except Exception as e:
+        print("Error parsing metadata:", e)
         return {}
