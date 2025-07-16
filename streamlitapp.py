@@ -18,10 +18,8 @@ if run_button and dataset_type and research_goal:
         agent = EEGReviewAgent()
         summary, raw_papers = agent.run(dataset_type, research_goal)
 
-        st.subheader("📋 Suggested Preprocessing Pipeline")
-        st.markdown(summary)
-
-        st.subheader("📚 Papers Used")
-        for paper in raw_papers:
-            st.markdown(f"- [{paper['title']}]({paper['url']})")
+        st.subheader("📋 Structured EEG Preprocessing Summary")
+        for idx, js in enumerate(summary):
+            st.markdown(f"### Paper {idx + 1}")
+            st.json(js)
 
