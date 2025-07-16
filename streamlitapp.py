@@ -1,25 +1,18 @@
 import streamlit as st
 from agent import EEGReviewAgent
 
-st.set_page_config(page_title="EEG Preprocessing Literature Agent", layout="wide")
-
 st.title("🧠 EEG Literature Review Agent")
-st.markdown("This agent helps you identify typical EEG preprocessing pipelines from the literature based on your dataset and objective.")
+api_key = st.secrets["HUGGINGFACE_API_KEY"]
 
-# Step 1: Collect inputs
-dataset_type = st.text_input("Describe your EEG dataset", placeholder="e.g., visual oddball")
-research_goal = st.text_input("What EEG feature are you analyzing?", placeholder="e.g., P300")
+dataset_type = st.text_input("Dataset Type (e.g., visual oddball, P300)")
+research_goal = st.text_input("Research Goal (e.g., event-related potentials)")
 
-run_button = st.button("Run Literature Review")
+if st.button("Generate Preprocessing Summary"):
+    agent = EEGReviewAgent(api_key)
+    results = agent.run(dataset_type, research_goal)
 
-# Step 2: Run agent
-if run_button and dataset_type and research_goal:
-    with st.spinner("Thinking... 🧠 Searching the literature and analyzing papers..."):
-        agent = EEGReviewAgent()
-        summary, raw_papers = agent.run(dataset_type, research_goal)
-
-        st.subheader("📋 Structured EEG Preprocessing Summary")
-        for idx, js in enumerate(summary):
-            st.markdown(f"### Paper {idx + 1}")
-            st.json(js)
-
+    for res in results:
+        st.subheader(res["title"])
+        st.markdown(f"**Authors:** {', '.join(res['authors'])}")
+        st.markdown(f"**Year:** {res['year']}")
+        st.json(res)
