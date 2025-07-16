@@ -2,7 +2,7 @@ import streamlit as st
 from agent import EEGReviewAgent
 
 st.title("🧠 EEG Literature Review Agent")
-api_key = st.secrets["HUGGINGFACE_API_KEY"]
+api_key = st.secrets["HF_API_KEY"]
 
 dataset_type = st.text_input("Dataset Type (e.g., visual oddball, P300)")
 research_goal = st.text_input("Research Goal (e.g., event-related potentials)")
