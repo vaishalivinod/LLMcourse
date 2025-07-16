@@ -1,79 +1,34 @@
 # agent.py
-import json
-import requests
-from pubmed import search_pubmed, fetch_full_text, get_metadata
-from typing import List
+from pubmed import search_pmc, fetch_article_xml, extract_methods_from_tree
 
 class EEGReviewAgent:
-    def __init__(self, api_key):
-        self.api_url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
-        self.headers = {"Authorization": f"Bearer {api_key}"}
+    def __init__(self):
+        self.memory = []
 
-    def thought(self, dataset_type, research_goal):
-        return f"Searching for EEG papers using '{dataset_type}' for goal '{research_goal}'"
+    def think(self, keywords):
+        return f"Formulating query for keywords: {keywords}"
 
-    def action(self, dataset_type, research_goal, n=5):
-        query = f"EEG AND {dataset_type} AND {research_goal} AND preprocessing"
-        pmc_ids = search_pubmed(query, max_results=n)
+    def act(self, keywords):
+        print("[Action] Searching PMC...")
+        pmc_ids = search_pmc(keywords)
+        print(f"[Observation] Found {len(pmc_ids)} articles.")
+        return pmc_ids
 
-        papers = []
+    def observe(self, pmc_ids):
+        extracted = []
         for pmc_id in pmc_ids:
-            methods = fetch_full_text(pmc_id)
-            if not methods:
+            tree = fetch_article_xml(pmc_id)
+            if tree is None:
+                print(f"[Skip] No full text for {pmc_id}")
                 continue
-            meta = get_metadata(pmc_id)
-            meta["methods"] = methods
-            papers.append(meta)
-        return papers
+            methods_text = extract_methods_from_tree(tree)
+            if not methods_text:
+                print(f"[Skip] No methods section in {pmc_id}")
+                continue
+            extracted.append((pmc_id, methods_text))
+        return extracted
 
-    def observation(self, papers: List[dict]):
-        filled = []
-        for paper in papers:
-            prompt = self.make_prompt(paper["methods"])
-            response = self.query_llm(prompt)
-            try:
-                parsed = json.loads(response)
-                parsed["title"] = paper.get("title", "")
-                parsed["authors"] = paper.get("authors", [])
-                parsed["year"] = paper.get("year", "")
-                filled.append(parsed)
-            except json.JSONDecodeError:
-                print("Failed to parse JSON")
-        return filled
-
-    def run(self, dataset_type, research_goal):
-        print(self.thought(dataset_type, research_goal))
-        papers = self.action(dataset_type, research_goal)
-        output = self.observation(papers)
-        return output
-
-    def make_prompt(self, method_text):
-        return f"""Extract EEG preprocessing steps from the Methods section below.
-Respond in this JSON format:
-
-{{
-  "study": {{
-    "cohort": "", "EEG channels": "", "EEG system": "", "sampling frequency": "", "task": "", "EEG analysis software": ""
-  }},
-  "preprocessing": {{
-    "channel rejection": "", "downsampling": "", "filtering": "", "re-referencing": "", "ICA": "", "epoching": "", "interpolation": ""
-  }},
-  "processing": {{
-    "ERSP": "", "PSD": "", "time frequency analysis": "", "frequency bands": ""
-  }}
-}}
-
---- METHODS SECTION ---
-{method_text}
-"""
-
-    def query_llm(self, prompt):
-        response = requests.post(
-            self.api_url,
-            headers=self.headers,
-            json={"inputs": prompt, "parameters": {"temperature": 0.3}}
-        )
-        try:
-            return response.json()[0]["generated_text"]
-        except:
-            return "Failed to parse LLM response"
+    def run(self, keywords):
+        print(self.think(keywords))
+        ids = self.act(keywords)
+        return self.observe(ids)

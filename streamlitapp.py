@@ -1,18 +1,18 @@
+# streamlitapp.py
 import streamlit as st
 from agent import EEGReviewAgent
 
 st.title("🧠 EEG Literature Review Agent")
-api_key = st.secrets["HF_API_KEY"]
 
-dataset_type = st.text_input("Dataset Type (e.g., visual oddball, P300)")
-research_goal = st.text_input("Research Goal (e.g., event-related potentials)")
+keywords = st.text_input("Enter search keywords (comma-separated):", "EEG, deep learning")
+agent = EEGReviewAgent()
 
-if st.button("Generate Preprocessing Summary"):
-    agent = EEGReviewAgent(api_key)
-    results = agent.run(dataset_type, research_goal)
+if st.button("Run Agent"):
+    with st.spinner("Running literature review..."):
+        keyword_list = [kw.strip() for kw in keywords.split(",")]
+        results = agent.run(keyword_list)
 
-    for res in results:
-        st.subheader(res["title"])
-        st.markdown(f"**Authors:** {', '.join(res['authors'])}")
-        st.markdown(f"**Year:** {res['year']}")
-        st.json(res)
+    st.success(f"Found {len(results)} papers with Methods sections.")
+    for pmc_id, methods in results:
+        st.subheader(f"PMC ID: {pmc_id}")
+        st.text_area("Methods Section", methods, height=200)

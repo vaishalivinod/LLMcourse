@@ -1,74 +1,79 @@
 import requests
-from xml.etree import ElementTree as ET
+import xml.etree.ElementTree as ET
+import re
+from thefuzz import fuzz
 
-NCBI_API = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
-PMC_OA_BASE = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
-
-def search_pubmed(query, max_results=5):
-    params = {
-        "db": "pmc",
-        "retmax": max_results,
-        "term": query,
-        "retmode": "json"   
-    }
-    response = requests.get(NCBI_API + "esearch.fcgi", params=params)
-    response.raise_for_status()  
-    data = response.json()
-    pmc_ids = data.get("esearchresult", {}).get("idlist", [])
-    return pmc_ids
-
-def fetch_full_text(pmc_id):
-    params = {
-        "verb": "GetRecord",
-        "identifier": f'oai:pubmedcentral.nih.gov:{pmc_id}',
-        "metadataPrefix": "pmc"
-    }
-    response = requests.get(PMC_OA_BASE, params=params)
-    if response.status_code != 200:
-        return None
-
+# --- MeSH and Query Optimization ---
+def get_mesh_terms(keyword):
     try:
-        tree = ET.fromstring(response.text)
-        # Usually the default namespace is used, get namespaces
-        ns = {'oai': 'http://www.openarchives.org/OAI/2.0/'}
-        methods_section = []
-
-        # Find all sections <sec> with title containing 'method'
-        for sec in tree.findall(".//sec"):
-            title_elem = sec.find("title")
-            if title_elem is not None and title_elem.text and "method" in title_elem.text.lower():
-                methods_section.append(ET.tostring(sec, encoding="unicode"))
-        
-        return methods_section[0] if methods_section else None
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=mesh&term={keyword}&retmode=xml"
+        resp = requests.get(url, timeout=10)
+        root = ET.fromstring(resp.content)
+        qt = root.find('.//QueryTranslation')
+        if qt is None:
+            return []
+        return re.findall(r'"([^"]+)"\\[MeSH Terms\\]', qt.text)[:5]
     except Exception as e:
-        print("Error parsing PMC full text:", e)
-        return None
+        print(f"MeSH retrieval error: {e}")
+        return []
 
-def get_metadata(pmc_id):
-    params = {
-        "db": "pmc",
-        "id": pmc_id,
-        "retmode": "xml"
-    }
-    response = requests.get(NCBI_API + "efetch.fcgi", params=params)
-    response.raise_for_status()
+def build_enhanced_query(keywords):
+    query_parts = []
+    for kw in keywords:
+        terms = [f'"{kw}"[Title/Abstract]'] + [f'"{t}"[MeSH Terms]' for t in get_mesh_terms(kw)]
+        query_parts.append(f"({' OR '.join(terms)})")
+    return " AND ".join(query_parts)
 
+# --- Search PMC for OA research articles ---
+def search_pmc_by_keyword(keywords):
     try:
-        tree = ET.fromstring(response.text)
-        article = tree.find(".//article-title")
-        authors = []
-        for contrib in tree.findall(".//contrib[@contrib-type='author']"):
-            fore = contrib.findtext("fore-name", "")
-            last = contrib.findtext("last-name", "")
-            full_name = (fore + " " + last).strip()
-            if full_name:
-                authors.append(full_name)
-        year = tree.findtext(".//pub-date/year")
-        return {
-            "title": article.text if article is not None else "Untitled",
-            "authors": authors,
-            "year": year,
-        }
+        query = build_enhanced_query(keywords)
+        query += " AND open access[filter]"
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=100"
+        resp = requests.get(url)
+        root = ET.fromstring(resp.content)
+        return [id_tag.text for id_tag in root.findall('.//IdList/Id')]
     except Exception as e:
-        print("Error parsing metadata:", e)
-        return {}
+        print(f"Search error: {e}")
+        return []
+
+# --- Fetch full text of a PMC article ---
+def fetch_full_text_pmc(pmc_id):
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&retmode=xml"
+    resp = requests.get(url)
+    return resp.text if resp.status_code == 200 else None
+
+
+# Acceptable section titles
+METHODS_TITLES = {"methods", "materials and methods", "methodology", "method"}
+SIMILARITY_THRESHOLD = 80
+
+def is_methods_section(title):
+    return any(fuzz.ratio(title.lower().strip(), ref) >= SIMILARITY_THRESHOLD for ref in METHODS_TITLES)
+
+def extract_text_from_section(section):
+    section_text = []
+    for elem in section.iter():
+        if elem.tag not in ["title", "sec"]:
+            if elem.text and elem.text.strip():
+                section_text.append(elem.text.strip())
+            if elem.tail and elem.tail.strip():
+                section_text.append(elem.tail.strip())
+    return "\n".join(filter(None, section_text)).strip()
+
+def extract_methods_from_xml(xml_string):
+    try:
+        root = ET.fromstring(xml_string)
+        methods_texts = []
+
+        for section in root.findall(".//sec"):
+            title_elem = section.find("title")
+            if title_elem is not None and is_methods_section(title_elem.text):
+                text = extract_text_from_section(section)
+                if text:
+                    methods_texts.append(text)
+
+        return "\n\n".join(methods_texts) if methods_texts else None
+    except Exception as e:
+        print(f"[Error] Failed to parse XML for methods: {e}")
+        return None
