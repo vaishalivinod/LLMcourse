@@ -3,7 +3,9 @@ import xml.etree.ElementTree as ET
 import re
 from thefuzz import fuzz
 
-# --- MeSH and Query Optimization ---
+SIMILARITY_THRESHOLD = 65
+METHODS_TITLES = {"methods", "materials and methods", "methodology", "experimental procedure"}
+
 def get_mesh_terms(keyword):
     try:
         url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=mesh&term={keyword}&retmode=xml"
@@ -12,68 +14,84 @@ def get_mesh_terms(keyword):
         qt = root.find('.//QueryTranslation')
         if qt is None:
             return []
-        return re.findall(r'"([^"]+)"\\[MeSH Terms\\]', qt.text)[:5]
+        return re.findall(r'"([^"]+)"\[MeSH Terms\]', qt.text)[:5]
     except Exception as e:
-        print(f"MeSH retrieval error: {e}")
+        print(f"[MeSH] Error: {e}")
         return []
 
 def build_enhanced_query(keywords):
-    query_parts = []
+    parts = []
     for kw in keywords:
-        terms = [f'"{kw}"[Title/Abstract]'] + [f'"{t}"[MeSH Terms]' for t in get_mesh_terms(kw)]
-        query_parts.append(f"({' OR '.join(terms)})")
-    return " AND ".join(query_parts)
+        mesh = get_mesh_terms(kw)
+        terms = [f'"{kw}"[Title/Abstract]'] + [f'"{m}"[MeSH Terms]' for m in mesh]
+        parts.append("(" + " OR ".join(terms) + ")")
+    return " AND ".join(parts)
 
-# --- Search PMC for OA research articles ---
 def search_pmc_by_keyword(keywords):
-    try:
-        query = build_enhanced_query(keywords)
-        query += " AND open access[filter]"
-        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=100"
-        resp = requests.get(url)
-        root = ET.fromstring(resp.content)
-        return [id_tag.text for id_tag in root.findall('.//IdList/Id')]
-    except Exception as e:
-        print(f"Search error: {e}")
-        return []
-
-# --- Fetch full text of a PMC article ---
-def fetch_full_text_pmc(pmc_id):
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&retmode=xml"
+    query = build_enhanced_query(keywords)
+    query += " AND open access[filter]"
+    url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        f"?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=100"
+    )
     resp = requests.get(url)
-    return resp.text if resp.status_code == 200 else None
+    root = ET.fromstring(resp.content)
+    ids = [id_tag.text for id_tag in root.findall('.//IdList/Id')]
+    print(f"[search_pmc] PMC IDs found: {ids}")
+    return ids
 
+def fetch_full_text(pmc_id):
+    url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        f"?db=pmc&id={pmc_id}&retmode=xml"
+    )
+    resp = requests.get(url)
+    if resp.status_code != 200 or not resp.text.strip().startswith('<?xml'):
+        print(f"[fetch_full_text_pmc] Bad XML or HTTP {resp.status_code} for {pmc_id}")
+        return None
+    return resp.text
 
-# Acceptable section titles
-METHODS_TITLES = {"methods", "materials and methods", "methodology", "method"}
-SIMILARITY_THRESHOLD = 80
+def extract_methods_section(xml_content, verbose=False):
+    try:
+        root = ET.fromstring(xml_content)
+        methods_sections = []  # ← This is the missing line
 
-def is_methods_section(title):
-    return any(fuzz.ratio(title.lower().strip(), ref) >= SIMILARITY_THRESHOLD for ref in METHODS_TITLES)
+        for sec in root.findall(".//sec"):
+            title_elem = sec.find("title")
+            if title_elem is not None and title_elem.text:
+                title = title_elem.text.strip()
+                score = max(fuzz.ratio(title.lower(), mt) for mt in METHODS_TITLES)
+                if verbose:
+                    print(f"    Title: {title} | Match score: {score}")
+                if score >= SIMILARITY_THRESHOLD:
+                    section_text = extract_text_from_section(sec)
+                    if section_text:
+                        methods_sections.append(section_text)
+            elif verbose:
+                print("    [Skip] Section without title")
+
+        return "\n\n".join(methods_sections) if methods_sections else None
+
+    except ET.ParseError as e:
+        if verbose:
+            print(f"  XML parsing error: {e}")
+        return None
+
 
 def extract_text_from_section(section):
-    section_text = []
+    lines = []
     for elem in section.iter():
-        if elem.tag not in ["title", "sec"]:
+        if elem.tag not in ("title", "sec"):
             if elem.text and elem.text.strip():
-                section_text.append(elem.text.strip())
+                lines.append(elem.text.strip())
             if elem.tail and elem.tail.strip():
-                section_text.append(elem.tail.strip())
-    return "\n".join(filter(None, section_text)).strip()
+                lines.append(elem.tail.strip())
+    return "\n".join(lines).strip()
 
-def extract_methods_from_xml(xml_string):
-    try:
-        root = ET.fromstring(xml_string)
-        methods_texts = []
-
-        for section in root.findall(".//sec"):
-            title_elem = section.find("title")
-            if title_elem is not None and is_methods_section(title_elem.text):
-                text = extract_text_from_section(section)
-                if text:
-                    methods_texts.append(text)
-
-        return "\n\n".join(methods_texts) if methods_texts else None
-    except Exception as e:
-        print(f"[Error] Failed to parse XML for methods: {e}")
-        return None
+def extract_metadata(root, pmc_id):
+    pmid = root.findtext('.//article-id[@pub-id-type="pmid"]', default="")
+    title = root.findtext('.//article-title', default="")
+    authors = [" ".join(filter(None, [a.findtext('given-names',''), a.findtext('surname','')])) 
+               for a in root.findall('.//contrib[@contrib-type="author"]')]
+    year = root.findtext('.//pub-date/year','')
+    return {"PMCID": pmc_id, "PMID": pmid, "title": title, "authors": authors, "year": year}

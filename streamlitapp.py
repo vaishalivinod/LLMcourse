@@ -1,18 +1,41 @@
-# streamlitapp.py
 import streamlit as st
-from agent import EEGReviewAgent
+from agent import retrieve_methods_sections
+from parser import LLMParser
 
-st.title("🧠 EEG Literature Review Agent")
+# Page config
+st.set_page_config(page_title="EEG Agent", layout="wide")
 
-keywords = st.text_input("Enter search keywords (comma-separated):", "EEG, deep learning")
-agent = EEGReviewAgent()
+st.title("🧠 EEG AI Agent - Visual Oddball Analyzer")
+st.markdown("Analyze EEG preprocessing methods using an autonomous LLM agent.")
+
+# Input
+keywords = st.text_input("Enter search keywords (comma-separated):", "EEG, visual oddball")
 
 if st.button("Run Agent"):
-    with st.spinner("Running literature review..."):
-        keyword_list = [kw.strip() for kw in keywords.split(",")]
-        results = agent.run(keyword_list)
+    with st.spinner("Running agent... please wait."):
+        # Run retrieval
+        kw_list = [k.strip() for k in keywords.split(",")]
+        raw_results = retrieve_methods_sections(kw_list)
 
-    st.success(f"Found {len(results)} papers with Methods sections.")
-    for pmc_id, methods in results:
-        st.subheader(f"PMC ID: {pmc_id}")
-        st.text_area("Methods Section", methods, height=200)
+        if not raw_results:
+            st.warning("No methods sections were extracted.")
+        else:
+            # Load parser
+            parser = LLMParser(st.secrets["HF_API_KEY"])
+            for pmc_id, method_text in raw_results.items():
+                st.subheader(f"📄 PMC ID: {pmc_id}")
+
+                # Fake metadata (for demo)
+                metadata = {
+                    "PMCID": pmc_id,
+                    "PMID": "",
+                    "title": f"EEG Study {pmc_id}",
+                    "authors": "Unknown",
+                    "year": "Unknown"
+                }
+
+                parsed = parser.parse_methods(metadata, method_text)
+                if parsed:
+                    st.json(parsed)
+                else:
+                    st.error("Failed to parse methods with LLM.")
