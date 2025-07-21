@@ -1,3 +1,9 @@
+streamlit
+requests
+beautifulsoup4
+networkx
+matplotlib
+lxml
 absl-py==2.1.0
 aiohappyeyeballs==2.4.0
 aiohttp==3.10.5
