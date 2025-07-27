@@ -1,77 +1,121 @@
 import streamlit as st
 import requests
+import xml.etree.ElementTree as ET
+import re
+from thefuzz import fuzz
 from transformers import pipeline
 
-st.title("🧠 AI Agent for Method Extraction from PubMed")
-st.markdown("Enter a neuroscience-related keyword to extract study details from PubMed abstracts.")
+st.set_page_config(page_title="AI Agent for Method Extraction", layout="wide")
+st.title("🧠 AI Agent for Neuroscience Methods Extraction")
 
-# Open-source LLM from HuggingFace (distilbart for QA)
-extractor = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+SIMILARITY_THRESHOLD = 65
+METHODS_TITLES = {"methods", "materials and methods", "methodology", "experimental procedure"}
 
-# Function to search PubMed
-def search_pubmed(keyword, max_results=5):
-    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    search_params = {
-        "db": "pubmed",
-        "term": keyword,
-        "retmode": "json",
-        "retmax": max_results
-    }
-    r = requests.get(search_url, params=search_params)
-    r.raise_for_status()
-    ids = r.json().get("esearchresult", {}).get("idlist", [])
+@st.cache_data
+def get_mesh_terms(keyword):
+    try:
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=mesh&term={keyword}&retmode=xml"
+        resp = requests.get(url, timeout=10)
+        root = ET.fromstring(resp.content)
+        qt = root.find('.//QueryTranslation')
+        if qt is None:
+            return []
+        return re.findall(r'"([^"]+)"\[MeSH Terms\]', qt.text)[:5]
+    except Exception as e:
+        return []
+
+def build_enhanced_query(keywords):
+    parts = []
+    for kw in keywords:
+        mesh = get_mesh_terms(kw)
+        terms = [f'"{kw}"[Title/Abstract]'] + [f'"{m}"[MeSH Terms]' for m in mesh]
+        parts.append("(" + " OR ".join(terms) + ")")
+    return " AND ".join(parts)
+
+def search_pmc_by_keyword(keywords):
+    query = build_enhanced_query(keywords)
+    query += " AND open access[filter]"
+    url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        f"?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=5"
+    )
+    resp = requests.get(url)
+    root = ET.fromstring(resp.content)
+    ids = [id_tag.text for id_tag in root.findall('.//IdList/Id')]
     return ids
 
-# Function to fetch abstract
-def fetch_abstract(pubmed_id):
-    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    fetch_params = {
-        "db": "pubmed",
-        "id": pubmed_id,
-        "retmode": "xml"
-    }
-    r = requests.get(fetch_url, params=fetch_params)
-    if r.status_code == 200:
-        from xml.etree import ElementTree as ET
-        tree = ET.fromstring(r.content)
-        abstract = tree.findtext(".//AbstractText")
-        return abstract
-    return None
+def fetch_full_text(pmc_id):
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&retmode=xml"
+    resp = requests.get(url)
+    if resp.status_code != 200 or not resp.text.strip().startswith('<?xml'):
+        return None
+    return resp.text
 
-# Questions for the LLM
+def extract_methods_section(xml_content):
+    try:
+        root = ET.fromstring(xml_content)
+        methods_sections = []
+        for sec in root.findall(".//sec"):
+            title_elem = sec.find("title")
+            if title_elem is not None and title_elem.text:
+                title = title_elem.text.strip()
+                score = max(fuzz.ratio(title.lower(), mt) for mt in METHODS_TITLES)
+                if score >= SIMILARITY_THRESHOLD:
+                    section_text = extract_text_from_section(sec)
+                    if section_text:
+                        methods_sections.append(section_text)
+        return "\n\n".join(methods_sections) if methods_sections else None
+    except ET.ParseError:
+        return None
+
+def extract_text_from_section(section):
+    lines = []
+    for elem in section.iter():
+        if elem.tag not in ("title", "sec"):
+            if elem.text and elem.text.strip():
+                lines.append(elem.text.strip())
+            if elem.tail and elem.tail.strip():
+                lines.append(elem.tail.strip())
+    return "\n".join(lines).strip()
+
+# QA Model for extraction
+qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+
 questions = {
-    "Cohort": "What kind of participants or patient group was studied?",
-    "Participants": "How many participants were in the study?",
+    "Cohort": "What kind of participants were in the study?",
+    "Participants": "How many participants were included?",
     "EEG Channels": "How many EEG channels were used?",
-    "Analysis Package": "What software or toolbox was used for EEG analysis?"
+    "Analysis Tool": "What programming or software package was used for analysis?"
 }
 
-# Streamlit Input
-keyword = st.text_input("🔎 Enter keyword(s):", value="EEG gait")
-
-if st.button("Search and Extract"):
-    with st.spinner("Searching and extracting..."):
-        ids = search_pubmed(keyword)
+# --- Streamlit Interface ---
+keywords = st.text_input("🔍 Enter keywords", value="EEG oddball")
+if st.button("Run Agent"):
+    with st.spinner("Running agent..."):
+        ids = search_pmc_by_keyword(keywords.split())
         if not ids:
-            st.warning("No articles found.")
+            st.warning("No open access articles found.")
         else:
-            st.success(f"Found {len(ids)} articles. Extracting info...")
+            st.success(f"Found {len(ids)} articles.")
+            data = []
 
-            results = []
-            for pubmed_id in ids:
-                abstract = fetch_abstract(pubmed_id)
-                if not abstract:
+            for pmc_id in ids:
+                xml = fetch_full_text(pmc_id)
+                if not xml:
                     continue
-                row = {"PubMed ID": pubmed_id}
-                for label, q in questions.items():
+                methods = extract_methods_section(xml)
+                if not methods:
+                    continue
+                row = {"PMC ID": pmc_id}
+                for key, question in questions.items():
                     try:
-                        answer = extractor(question=q, context=abstract)
-                        row[label] = answer['answer']
+                        answer = qa_pipeline(question=question, context=methods)
+                        row[key] = answer["answer"]
                     except:
-                        row[label] = "Not found"
-                results.append(row)
+                        row[key] = "Not found"
+                data.append(row)
 
-            if results:
-                st.dataframe(results)
+            if data:
+                st.dataframe(data)
             else:
-                st.warning("No abstracts processed.")
+                st.warning("Could not extract method sections.")
