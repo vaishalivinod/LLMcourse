@@ -4,3 +4,6 @@ lxml
 beautifulsoup4
 networkx
 matplotlib
+transformers
+thefuzz
+torch
