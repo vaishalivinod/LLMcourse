@@ -8,16 +8,26 @@ st.title("🧠 Neurosift: Extract Methods Info from Open PMC Articles")
 # ----------- Search Function -----------
 def search_pmc_articles(keywords, max_results=5):
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    query = "+AND+".join(keywords.split())
+
+    # Use Entrez-compatible syntax: keyword1[Title/Abstract] AND keyword2[Title/Abstract]
+    query_parts = [f"{word}[Title/Abstract]" for word in keywords.split()]
+    query = " AND ".join(query_parts)
+
     params = {
         "db": "pmc",
         "term": query,
         "retmode": "xml",
         "retmax": max_results
     }
+
     try:
         response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
+
+        # Check if result is valid XML
+        if not response.content.strip().startswith(b"<?xml"):
+            raise ValueError("Invalid response from NCBI")
+
         root = ET.fromstring(response.content)
         return [id_tag.text for id_tag in root.findall(".//Id")]
     except Exception as e:
