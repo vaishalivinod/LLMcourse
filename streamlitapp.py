@@ -37,19 +37,41 @@ def search_pmc_by_keyword(keywords):
     query += " AND open access[filter]"
     url = (
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        f"?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=5"
+        f"?db=pmc&term={requests.utils.quote(query)}&retmode=xml&retmax=100"
     )
     resp = requests.get(url)
-    root = ET.fromstring(resp.content)
+    
+    # ✅ Check for errors
+    if resp.status_code != 200:
+        print(f"[ERROR] HTTP {resp.status_code}")
+        return []
+
+    if not resp.text.strip().startswith('<?xml'):
+        print("[ERROR] Response is not valid XML.")
+        print(resp.text[:200])  # Optional: show part of the response
+        return []
+
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError as e:
+        print(f"[ERROR] XML parsing failed: {e}")
+        return []
+
     ids = [id_tag.text for id_tag in root.findall('.//IdList/Id')]
+    print(f"[search_pmc] PMC IDs found: {ids}")
     return ids
+
 
 def fetch_full_text(pmc_id):
     url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&retmode=xml"
     resp = requests.get(url)
+
     if resp.status_code != 200 or not resp.text.strip().startswith('<?xml'):
+        print(f"[fetch_full_text] Failed for {pmc_id}: HTTP {resp.status_code}")
         return None
+
     return resp.text
+
 
 def extract_methods_section(xml_content):
     try:
