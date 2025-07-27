@@ -3,83 +3,97 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 
-st.title("🧠 Neurosift: AI Agent for Method Extraction from PMC")
+st.title("🧠 Neurosift: Extract Methods Info from Open PMC Articles")
 
-# --- Function to search PMC for open-access articles ---
+# ----------- Search Function -----------
 def search_pmc_articles(keywords, max_results=5):
-    query = "+AND+".join(keywords.split()) + "+AND+open+access[filter]"
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term={query}&retmode=xml&retmax={max_results}"
-    resp = requests.get(url)
-
-    if resp.status_code != 200 or not resp.text.startswith("<?xml"):
-        st.error("❌ Failed to fetch search results.")
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    query = "+AND+".join(keywords.split())
+    params = {
+        "db": "pmc",
+        "term": query,
+        "retmode": "xml",
+        "retmax": max_results
+    }
+    try:
+        response = requests.get(base_url, params=params, timeout=10)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        return [id_tag.text for id_tag in root.findall(".//Id")]
+    except Exception as e:
+        st.error(f"❌ Error fetching PMC articles: {e}")
         return []
 
-    root = ET.fromstring(resp.content)
-    return [id_tag.text for id_tag in root.findall(".//Id")]
-
-# --- Function to fetch article full-text XML ---
+# ----------- Fetch Full XML -----------
 def fetch_article_xml(pmcid):
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
-    resp = requests.get(url)
-    if resp.status_code != 200 or not resp.text.startswith("<?xml"):
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {
+        "db": "pmc",
+        "id": pmcid,
+        "retmode": "xml"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
+            return resp.text
+    except:
         return None
-    return resp.text
+    return None
 
-# --- Function to extract Methods section ---
+# ----------- Extract Methods Section -----------
 def extract_methods_text(xml_content):
     try:
         root = ET.fromstring(xml_content)
-        sections = []
+        methods_sections = []
         for sec in root.findall(".//sec"):
-            title = sec.find("title")
-            if title is not None and "method" in title.text.lower():
-                paragraphs = [elem.text.strip() for elem in sec.findall(".//p") if elem.text]
-                sections.append("\n".join(paragraphs))
-        return "\n\n".join(sections) if sections else None
+            title_elem = sec.find("title")
+            if title_elem is not None and "method" in title_elem.text.lower():
+                paragraphs = [p.text.strip() for p in sec.findall(".//p") if p.text]
+                methods_sections.append("\n".join(paragraphs))
+        return "\n\n".join(methods_sections) if methods_sections else None
     except ET.ParseError:
         return None
 
-# --- Function to extract fields from Methods ---
+# ----------- Extract Structured Fields -----------
 def extract_fields(text):
-    def find(pattern):
-        match = re.search(pattern, text, re.IGNORECASE)
-        return match.group(1) if match else ""
-    
+    def match(pattern):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1) if m else ""
+
     return {
-        "Study cohort": find(r"(cohort|participants) (included|consisted of|comprised|were) ([^.]+)"),
-        "Number of participants": find(r"(\d+)\s+(participants|subjects)"),
-        "EEG channels": find(r"(\d+)\s+(EEG channels|electrodes)"),
-        "Analysis package": find(r"(EEGLAB|MNE|BrainVision|FieldTrip|SPM|Python|Matlab)")
+        "Study cohort": match(r"cohort.*?(\d+[^.,;\n]*)"),
+        "Participants": match(r"(\d+)\s+(participants|subjects)"),
+        "EEG channels": match(r"(\d+)\s+(channels|electrodes)"),
+        "Analysis software": match(r"(EEGLAB|MNE|BrainVision|FieldTrip|SPM|Python|Matlab)")
     }
 
-# --- Streamlit interface ---
+# ----------- UI -----------
 keywords = st.text_input("Enter keywords (e.g. EEG visual oddball):")
 
-if st.button("Search"):
-    if not keywords:
-        st.warning("Please enter keywords.")
+if st.button("Search & Extract"):
+    if not keywords.strip():
+        st.warning("⚠️ Please enter at least one keyword.")
     else:
-        st.info("🔍 Searching for open-access PMC articles...")
-        ids = search_pmc_articles(keywords)
+        st.info("🔍 Searching for articles...")
+        pmc_ids = search_pmc_articles(keywords)
 
-        if not ids:
+        if not pmc_ids:
             st.error("❌ No articles found.")
         else:
-            data = []
-            for pmcid in ids:
-                xml = fetch_article_xml(pmcid)
+            results = []
+            for pmc_id in pmc_ids:
+                xml = fetch_article_xml(pmc_id)
                 if not xml:
                     continue
-                methods = extract_methods_text(xml)
-                if not methods:
+                methods_text = extract_methods_text(xml)
+                if not methods_text:
                     continue
-                fields = extract_fields(methods)
-                fields["PMCID"] = pmcid
-                data.append(fields)
+                fields = extract_fields(methods_text)
+                fields["PMCID"] = pmc_id
+                results.append(fields)
 
-            if data:
-                st.success(f"✅ Found {len(data)} articles with Methods sections.")
-                st.dataframe(data)
+            if results:
+                st.success(f"✅ Found {len(results)} articles with extractable Methods sections.")
+                st.dataframe(results)
             else:
-                st.error("❌ No Methods sections found in full-text XML.")
+                st.error("❌ No usable Methods sections found.")
