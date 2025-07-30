@@ -1,109 +1,61 @@
 import streamlit as st
-import requests
-import xml.etree.ElementTree as ET
-import re
+from utils.article_fetcher import search_pmc_by_keyword, fetch_full_text_pmc, read_txt_files
+from utils.saveas import save_xml, save_csv
+from utils.log_search import keywords_to_ids
+from utils.methodstext import extract_methods
+from utils.llm import extract_parameters
+from utils.config import dir_fulltexts, dir_log_results, dir_researcharticles, dir_methods
+from utils.prompts import study_prompts, gait_eeg_prompts
+from utils.article_fetcher import filter_research_articles
+import pandas as pd
 
-st.title("🧠 Neurosift: Extract Methods Info from Open PMC Articles")
+st.set_page_config(page_title="EEG Agent", layout="wide")
+st.title("🧠 AI Agent for EEG Literature Extraction")
 
-# ----------- Search Function -----------
-def search_pmc_articles(keywords, max_results=5):
-    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+keywords = st.text_input("Enter keywords (separated by commas)", "Mobile-EEG, Gait")
 
-    # Use Entrez-compatible syntax: keyword1[Title/Abstract] AND keyword2[Title/Abstract]
-    query_parts = [f"{word}[Title/Abstract]" for word in keywords.split()]
-    query = " AND ".join(query_parts)
+if st.button("Run Extraction"):
+    keywords_list = [k.strip() for k in keywords.split(",")]
+    log_file_path = dir_log_results / "keyword_overview.txt"
 
-    params = {
-        "db": "pmc",
-        "term": query,
-        "retmode": "xml",
-        "retmax": max_results
-    }
+    with st.spinner("🔍 Searching PMC for articles..."):
+        pmc_ids = search_pmc_by_keyword(keywords_list)
+    
+    if not pmc_ids:
+        st.error("No PMC articles found.")
+        st.stop()
 
-    try:
-        response = requests.get(base_url, params=params, timeout=10)
-        response.raise_for_status()
+    st.success(f"✅ Found {len(pmc_ids)} articles.")
 
-        # Check if result is valid XML
-        if not response.content.strip().startswith(b"<?xml"):
-            raise ValueError("Invalid response from NCBI")
+    with st.spinner("📥 Downloading full text XMLs..."):
+        for pmc_id in pmc_ids:
+            full_text = fetch_full_text_pmc(pmc_id)
+            if full_text:
+                save_xml(pmc_id, full_text, dir_fulltexts)
 
-        root = ET.fromstring(response.content)
-        return [id_tag.text for id_tag in root.findall(".//Id")]
-    except Exception as e:
-        st.error(f"❌ Error fetching PMC articles: {e}")
-        return []
+    with st.spinner("🧪 Filtering research articles..."):
+        filter_research_articles(dir_fulltexts, dir_researcharticles)
 
-# ----------- Fetch Full XML -----------
-def fetch_article_xml(pmcid):
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    params = {
-        "db": "pmc",
-        "id": pmcid,
-        "retmode": "xml"
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
-            return resp.text
-    except:
-        return None
-    return None
+    with st.spinner("✂️ Extracting methods sections..."):
+        extract_methods(input_folder=dir_researcharticles, output_folder=dir_methods)
 
-# ----------- Extract Methods Section -----------
-def extract_methods_text(xml_content):
-    try:
-        root = ET.fromstring(xml_content)
-        methods_sections = []
-        for sec in root.findall(".//sec"):
-            title_elem = sec.find("title")
-            if title_elem is not None and "method" in title_elem.text.lower():
-                paragraphs = [p.text.strip() for p in sec.findall(".//p") if p.text]
-                methods_sections.append("\n".join(paragraphs))
-        return "\n\n".join(methods_sections) if methods_sections else None
-    except ET.ParseError:
-        return None
+    with st.spinner("🧠 Extracting study and preprocessing parameters..."):
+        txt_files = read_txt_files(dir_methods)
+        results = {}
 
-# ----------- Extract Structured Fields -----------
-def extract_fields(text):
-    def match(pattern):
-        m = re.search(pattern, text, re.IGNORECASE)
-        return m.group(1) if m else ""
+        for file, context in txt_files.items():
+            if context.strip():
+                file_results = {}
+                file_results.update(extract_parameters(context, study_prompts))
+                file_results.update(extract_parameters(context, gait_eeg_prompts))
+                results[file] = file_results
 
-    return {
-        "Study cohort": match(r"cohort.*?(\d+[^.,;\n]*)"),
-        "Participants": match(r"(\d+)\s+(participants|subjects)"),
-        "EEG channels": match(r"(\d+)\s+(channels|electrodes)"),
-        "Analysis software": match(r"(EEGLAB|MNE|BrainVision|FieldTrip|SPM|Python|Matlab)")
-    }
+    # Convert to DataFrame
+    df = pd.DataFrame.from_dict(results, orient='index')
+    st.success("✅ Extraction completed.")
 
-# ----------- UI -----------
-keywords = st.text_input("Enter keywords (e.g. EEG visual oddball):")
+    st.dataframe(df)
 
-if st.button("Search & Extract"):
-    if not keywords.strip():
-        st.warning("⚠️ Please enter at least one keyword.")
-    else:
-        st.info("🔍 Searching for articles...")
-        pmc_ids = search_pmc_articles(keywords)
-
-        if not pmc_ids:
-            st.error("❌ No articles found.")
-        else:
-            results = []
-            for pmc_id in pmc_ids:
-                xml = fetch_article_xml(pmc_id)
-                if not xml:
-                    continue
-                methods_text = extract_methods_text(xml)
-                if not methods_text:
-                    continue
-                fields = extract_fields(methods_text)
-                fields["PMCID"] = pmc_id
-                results.append(fields)
-
-            if results:
-                st.success(f"✅ Found {len(results)} articles with extractable Methods sections.")
-                st.dataframe(results)
-            else:
-                st.error("❌ No usable Methods sections found.")
+    # Optional save to download
+    save_csv(results, "preprocessing_gaiteeg.csv")
+    st.download_button("⬇️ Download CSV", data=df.to_csv(), file_name="results.csv", mime="text/csv")
