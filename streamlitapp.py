@@ -1,97 +1,59 @@
 import streamlit as st
-import fitz  # PyMuPDF
-import re
-import pandas as pd
-from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import torch
+import PyPDF2
+import tempfile
 
-st.set_page_config(page_title="EEG Paper Analyzer (BioBERT)", layout="wide")
-st.title("🧠 EEG Methods Extractor with BioBERT")
-
-# Load BioBERT QA model
+# Load FLAN-T5 model and tokenizer
 @st.cache_resource
-def load_qa_pipeline():
-    model_name = "dmis-lab/biobert-base-cased-v1.1"
+def load_model():
+    model_name = "google/flan-t5-base"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForQuestionAnswering.from_pretrained(model_name)
-    return pipeline("question-answering", model=model, tokenizer=tokenizer)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    return tokenizer, model
 
-qa_pipeline = load_qa_pipeline()
+tokenizer, model = load_model()
 
-QUESTIONS = {
-    "Cohort": "What is the participant group in this study?",
-    "Participants": "How many participants were included?",
-    "EEG Channels": "How many EEG channels or electrodes were used?",
-    "Software": "What software or toolbox was used to analyze EEG data?",
-}
+# Function to extract text from PDF
+def extract_text_from_pdf(pdf_file):
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text() + "\n"
+    return text
 
-uploaded_files = st.file_uploader("📄 Upload up to 10 EEG-related PDF files", type="pdf", accept_multiple_files=True)
+# Function to generate answer from model
+def generate_answer(context, question):
+    prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+    outputs = model.generate(**inputs, max_new_tokens=100)
+    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return answer
 
-# Extract full text from PDF
-def extract_text(file):
-    with fitz.open(stream=file.read(), filetype="pdf") as doc:
-        return "\n".join([page.get_text() for page in doc])
+# Streamlit UI
+st.title("🧠 NeuroSift: Extracting methods from Scientific text")
 
-# Try to extract methods section only
-def extract_methods(text):
-    text = re.sub(r'\s+', ' ', text)  # normalize whitespace
-    match = re.search(r"(methods|materials and methods|methodology)", text, re.IGNORECASE)
-    if not match:
-        return text
-    start = match.start()
-    end_match = re.search(r"(results|discussion|conclusion|references|figures|tables)", text[start:], re.IGNORECASE)
-    end = start + end_match.start() if end_match else len(text)
-    return text[start:end]
+uploaded_files = st.file_uploader("Upload up to 10 PDF articles", type=["pdf"], accept_multiple_files=True)
+question = st.text_input("Enter your question (e.g. 'How many EEG channels were used?')")
 
-def chunk_text(text, max_tokens=450):
-    """Split text into overlapping chunks suitable for BioBERT context."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks, current = [], []
-
-    for sent in sentences:
-        current.append(sent)
-        if len(" ".join(current).split()) > max_tokens:
-            chunks.append(" ".join(current))
-            current = current[-2:]  # overlap last 2 sentences
-
-    if current:
-        chunks.append(" ".join(current))
-    return chunks
-
-# Ask QA questions using BioBERT
-def ask_biobert_questions(context):
-    result = {}
-    chunks = chunk_text(context)
-
-    for key, question in QUESTIONS.items():
-        best_answer, best_score = "", -1
-        for chunk in chunks:
+if st.button("Run QA"):
+    if not uploaded_files or not question:
+        st.warning("Please upload PDFs and enter a question.")
+    else:
+        st.write("---")
+        for file in uploaded_files:
             try:
-                output = qa_pipeline(question=question, context=chunk)
-                if output['score'] > best_score and len(output['answer'].strip()) > 2:
-                    best_answer, best_score = output["answer"].strip(), output["score"]
-            except:
-                continue
-        result[key] = best_answer if best_answer else "Not found"
-    return result
+                with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                    tmp_file.write(file.read())
+                    tmp_path = tmp_file.name
 
-# Run extraction
-if uploaded_files:
-    rows = []
-    for file in uploaded_files:
-        with st.spinner(f"Processing: {file.name}"):
-            try:
-                full_text = extract_text(file)
-                methods_text = extract_methods(full_text)
-                answers = ask_biobert_questions(methods_text)
-                answers["Filename"] = file.name
-                rows.append(answers)
+                with open(tmp_path, 'rb') as f:
+                    text = extract_text_from_pdf(f)
+                
+                truncated_text = text[:2000]  # Limit to first ~2K characters
+                answer = generate_answer(truncated_text, question)
+
+                st.subheader(f"📄 {file.name}")
+                st.markdown(f"**Answer:** {answer}")
             except Exception as e:
-                st.error(f"❌ Error with {file.name}: {e}")
-
-    if rows:
-        df = pd.DataFrame(rows)
-        df = df[["Filename"] + list(QUESTIONS.keys())]
-        st.success("✅ Done!")
-        st.dataframe(df)
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Download CSV", csv, "results.csv", "text/csv")
+                st.error(f"❌ Error processing {file.name}: {e}")
