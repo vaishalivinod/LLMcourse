@@ -1,61 +1,92 @@
 import streamlit as st
-from utils.article_fetcher import search_pmc_by_keyword, fetch_full_text_pmc, read_txt_files
-from utils.saveas import save_xml, save_csv
-from utils.log_search import keywords_to_ids
-from utils.methodstext import extract_methods
-from utils.llm import extract_parameters
-from utils.config import dir_fulltexts, dir_log_results, dir_researcharticles, dir_methods
-from utils.prompts import study_prompts, gait_eeg_prompts
-from utils.article_fetcher import filter_research_articles
+import fitz  # PyMuPDF
+import re
 import pandas as pd
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
-st.set_page_config(page_title="EEG Agent", layout="wide")
-st.title("🧠 AI Agent for EEG Literature Extraction")
+st.set_page_config(page_title="EEG PDF Analyzer", layout="wide")
+st.title("🧠 Analyze EEG Methods from PDF Papers (Hugging Face Model)")
 
-keywords = st.text_input("Enter keywords (separated by commas)", "Mobile-EEG, Gait")
+# Load HF model once
+@st.cache_resource
+def load_model():
+    model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto"
+    )
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+    return pipe
 
-if st.button("Run Extraction"):
-    keywords_list = [k.strip() for k in keywords.split(",")]
-    log_file_path = dir_log_results / "keyword_overview.txt"
+llm = load_model()
 
-    with st.spinner("🔍 Searching PMC for articles..."):
-        pmc_ids = search_pmc_by_keyword(keywords_list)
-    
-    if not pmc_ids:
-        st.error("No PMC articles found.")
-        st.stop()
+# Questions to ask
+QUESTIONS = {
+    "Cohort": "What is the participant group in this study?",
+    "Number of Participants": "How many participants are in the study?",
+    "Number of EEG Electrodes": "How many EEG electrodes were recorded?",
+    "Analysis Software": "Which EEG analysis software or toolbox was used?",
+}
 
-    st.success(f"✅ Found {len(pmc_ids)} articles.")
+# File uploader
+uploaded_files = st.file_uploader("📄 Upload up to 10 PDF articles", type="pdf", accept_multiple_files=True)
 
-    with st.spinner("📥 Downloading full text XMLs..."):
-        for pmc_id in pmc_ids:
-            full_text = fetch_full_text_pmc(pmc_id)
-            if full_text:
-                save_xml(pmc_id, full_text, dir_fulltexts)
+# PDF reading and methods extraction
+def extract_text_from_pdf(file):
+    with fitz.open(stream=file.read(), filetype="pdf") as doc:
+        return "\n".join([page.get_text() for page in doc])
 
-    with st.spinner("🧪 Filtering research articles..."):
-        filter_research_articles(dir_fulltexts, dir_researcharticles)
+def extract_methods_section(text):
+    match = re.search(r"\b(methods|materials and methods|methodology)\b", text, re.IGNORECASE)
+    if not match:
+        return ""
+    start = match.start()
+    # Try to find end of section
+    end_match = re.search(r"\b(results|discussion|conclusion|references)\b", text[start:], re.IGNORECASE)
+    end = start + end_match.start() if end_match else len(text)
+    return text[start:end].strip()
 
-    with st.spinner("✂️ Extracting methods sections..."):
-        extract_methods(input_folder=dir_researcharticles, output_folder=dir_methods)
+def ask_questions_locally(text):
+    responses = {}
+    for key, question in QUESTIONS.items():
+        prompt = f"[INST] Given the following Methods section from an EEG research paper:\n{text}\n\nQuestion: {question}\nAnswer: [/INST]"
+        try:
+            output = llm(prompt, max_new_tokens=200, temperature=0.2)
+            answer = output[0]['generated_text'].split("[/INST]")[-1].strip()
+            responses[key] = answer
+        except Exception as e:
+            responses[key] = f"Error: {e}"
+    return responses
 
-    with st.spinner("🧠 Extracting study and preprocessing parameters..."):
-        txt_files = read_txt_files(dir_methods)
-        results = {}
+# Main logic
+if uploaded_files:
+    all_data = []
 
-        for file, context in txt_files.items():
-            if context.strip():
-                file_results = {}
-                file_results.update(extract_parameters(context, study_prompts))
-                file_results.update(extract_parameters(context, gait_eeg_prompts))
-                results[file] = file_results
+    for file in uploaded_files[:10]:
+        with st.spinner(f"🔍 Processing {file.name}..."):
+            try:
+                text = extract_text_from_pdf(file)
+                methods = extract_methods_section(text)
 
-    # Convert to DataFrame
-    df = pd.DataFrame.from_dict(results, orient='index')
-    st.success("✅ Extraction completed.")
+                if not methods:
+                    st.warning(f"⚠️ Methods section not found in {file.name}")
+                    continue
 
-    st.dataframe(df)
+                result = ask_questions_locally(methods)
+                result["Filename"] = file.name
+                all_data.append(result)
 
-    # Optional save to download
-    save_csv(results, "preprocessing_gaiteeg.csv")
-    st.download_button("⬇️ Download CSV", data=df.to_csv(), file_name="results.csv", mime="text/csv")
+            except Exception as e:
+                st.error(f"❌ Error in {file.name}: {e}")
+
+    if all_data:
+        df = pd.DataFrame(all_data)
+        df = df[["Filename"] + list(QUESTIONS.keys())]
+        st.success("✅ Done! Here's your extracted data:")
+        st.dataframe(df)
+
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Download CSV", csv, "eeg_extraction_results.csv", "text/csv")
