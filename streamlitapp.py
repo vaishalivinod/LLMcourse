@@ -33,23 +33,45 @@ def extract_text(file):
 
 # Try to extract methods section only
 def extract_methods(text):
+    text = re.sub(r'\s+', ' ', text)  # normalize whitespace
     match = re.search(r"(methods|materials and methods|methodology)", text, re.IGNORECASE)
     if not match:
-        return text  # fallback to full text
+        return text
     start = match.start()
-    end_match = re.search(r"(results|discussion|conclusion|references)", text[start:], re.IGNORECASE)
+    end_match = re.search(r"(results|discussion|conclusion|references|figures|tables)", text[start:], re.IGNORECASE)
     end = start + end_match.start() if end_match else len(text)
     return text[start:end]
+
+def chunk_text(text, max_tokens=450):
+    """Split text into overlapping chunks suitable for BioBERT context."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks, current = [], []
+
+    for sent in sentences:
+        current.append(sent)
+        if len(" ".join(current).split()) > max_tokens:
+            chunks.append(" ".join(current))
+            current = current[-2:]  # overlap last 2 sentences
+
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
 
 # Ask QA questions using BioBERT
 def ask_biobert_questions(context):
     result = {}
+    chunks = chunk_text(context)
+
     for key, question in QUESTIONS.items():
-        try:
-            answer = qa_pipeline(question=question, context=context)
-            result[key] = answer["answer"]
-        except Exception as e:
-            result[key] = f"Error: {e}"
+        best_answer, best_score = "", -1
+        for chunk in chunks:
+            try:
+                output = qa_pipeline(question=question, context=chunk)
+                if output['score'] > best_score and len(output['answer'].strip()) > 2:
+                    best_answer, best_score = output["answer"].strip(), output["score"]
+            except:
+                continue
+        result[key] = best_answer if best_answer else "Not found"
     return result
 
 # Run extraction
