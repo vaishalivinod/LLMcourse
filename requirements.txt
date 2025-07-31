@@ -1,9 +1,5 @@
 streamlit
-requests
-lxml
-beautifulsoup4
-networkx
-matplotlib
+PyMuPDF
 transformers
-thefuzz
 torch
+pandas
